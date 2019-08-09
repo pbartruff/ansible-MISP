@@ -77,12 +77,6 @@
         creates: /tmp/mysqld_safe.out
         chdir: /var/lib/mysql
       ignore_errors: true
-    - name: Docker | Manually restart apache service
-      shell: >
-        apachectl restart > /tmp/apache2.out 2>&1 &
-      args:
-        creates: /tmp/apache2.out
-      ignore_errors: true
   when: >
     (ansible_virtualization_type is defined and ansible_virtualization_type == "docker")
 
@@ -184,17 +178,30 @@
 
 ## https://github.com/MISP/MISP/blob/e763e7646f7bbae5183ab93df840501d88c47119/INSTALL/UPDATE.txt
 - name: updating existing MISP - minor releases
-  command: "git pull origin {{ misp_version }}"
-  args:
-    chdir: "{{ misp_rootdir }}"
+  git:
+    repo: https://github.com/MISP/MISP.git
+    dest: "{{ misp_rootdir }}"
+    version: "{{ misp_version }}"
+    update: yes
+    force: yes
+#  command: "git pull origin {{ misp_version }}"
+#  args:
+#    chdir: "{{ misp_rootdir }}"
 #  command: "git pull origin {{ misp_version }} --verify-signatures chdir={{ misp_rootdir }}"
+#  register: gitpull_result
+#  changed_when: not ("'Already up-to-date.' in gitpull_result.stdout")
   when: m.stat.exists
-  register: gitpull_result
-  changed_when: not ("'Already up-to-date.' in gitpull_result.stdout")
   notify:
     - updating existing MISP submodules - minor releases
   become: yes
   become_user: "{{ www_user }}"
+
+- name: Ensure pip cache permissions are correct
+  file:
+    dest: /var/www/.cache/pip/http
+    state: directory
+    mode: '0755'
+    owner: "{{ www_user }}"
 
 - name: install python dependencies with pip - python3
   pip:
@@ -244,7 +251,7 @@
 - name: setting core.filemode for git
   git_config:
     name: core.filemode
-    value: false
+    value: 'false'
     scope: local
     repo: "{{ misp_rootdir }}"
 
@@ -329,14 +336,20 @@
   template: "src=misp-php.ini.j2 dest={{ php_confdir }}/misp-php.{{ php_confext }} mode=0644"
   notify:
     - restart webserver
+    - restart webserver - docker,debian
+    - restart webserver - docker,redhat
 - name: Enforce Timezone in php.ini
   replace: "dest={{ php_ini }} regexp='^;date.timezone =' replace='date.timezone = {{ tz }}'"
   notify:
     - restart webserver
+    - restart webserver - docker,debian
+    - restart webserver - docker,redhat
 - name: enabling MISP php settings
   file: "src={{ php_confdir }}/misp-php.ini dest={{ php_confenable }}/99-misp.ini state=link"
   notify:
     - restart webserver
+    - restart webserver - docker,debian
+    - restart webserver - docker,redhat
   when: >
     (ansible_distribution == 'Debian' or ansible_distribution == 'Ubuntu') and
     (misp_webserver is not defined or misp_webserver == 'apache2')
@@ -408,10 +421,12 @@
     - "require_once dirname(__DIR__) . '/Vendor/autoload.php';"
 
 - name: Generating salt
-  shell: >
+  shell: |
+    set -o pipefail
     openssl rand -base64 32 | sed 's@[=\\/\\+]@@g;' | tee {{ misp_rootdir }}/.salt
   args:
     creates: "{{ misp_rootdir }}/.salt"
+    executable: /bin/bash
   register: salt1
   changed_when: false
   no_log: "{{ misp_no_log }}"
@@ -550,7 +565,7 @@
   command: "bash {{ misp_rootdir }}/app/Console/worker/start.sh"
   become: yes
   become_user: "{{ www_user }}"
-  when: ps.stdout.find("{{ misp_rootdir }}/app/Vendor/kamisama/php-resque-ex") != -1
+  when: misp_rootdir + '/app/Vendor/kamisama/php-resque-ex' not in ps.stdout
 
 - name: add MISP worker script for boot
   lineinfile:
@@ -587,17 +602,6 @@
   patch:
     src: patch-cakephp-snuffleupagus-strict
     basedir: /var/www/MISP/app/Lib
-- name: patch MISP with stricter casting to support sp.global_strict
-  patch:
-    src: patch-misp-snuffleupagus-strict
-    basedir: /var/www/MISP
-
-- name: Debian | Docker | Restart apache
-  shell: "apachectl restart > /tmp/apache3.out 2>&1"
-  args:
-    creates: /tmp/apache3.out
-  ignore_errors: true
-  when: (ansible_virtualization_type is defined and ansible_virtualization_type == "docker")
 
 - include: misp-modules.yml
 - include: misp-gem.yml
